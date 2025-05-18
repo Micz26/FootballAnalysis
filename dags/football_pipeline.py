@@ -2,54 +2,74 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
 import pandas as pd
-import kagglehub
-from kagglehub import KaggleDatasetAdapter
-
-def download_and_load_dataset():
-    # Ścieżka pliku wewnątrz datasetu (możesz to sprawdzić ręcznie po pobraniu raz)
-    file_path = "players.csv"
-    df = kagglehub.load_dataset(
-        KaggleDatasetAdapter.PANDAS,
-        "davidcariboo/player-scores",
-        file_path,
-    )
-    df.to_csv('/tmp/raw_players.csv', index=False)
-
-def preprocess_data():
-    df = pd.read_csv('/tmp/raw_players.csv')
-    # Prosty preprocessing: wybierz tylko aktywnych graczy z ważnym ratingiem
-    df_clean = df.dropna(subset=["overall", "potential", "age"])
-    df_clean = df_clean[df_clean["age"] > 16]  # przykład
-    df_clean.to_csv('/tmp/cleaned_players.csv', index=False)
-
-def prepare_for_powerbi():
-    df = pd.read_csv('/tmp/cleaned_players.csv')
-    # Grupowanie: średnia ocena według pozycji
-    summary = df.groupby("position")["overall"].mean().reset_index(name="avg_overall")
-    summary.to_csv('/tmp/powerbi_summary.csv', index=False)
+import os
 
 default_args = {
-    'start_date': datetime(2024, 1, 1),
+    'owner': 'airflow',
+    'start_date': datetime(2023, 1, 1),
 }
 
-with DAG('player_scores_pipeline',
-         schedule_interval=None,
-         default_args=default_args,
-         catchup=False) as dag:
+dag = DAG(
+    dag_id='football_etl_model_star',
+    default_args=default_args,
+    schedule_interval=None,
+    catchup=False,
+)
 
-    t1 = PythonOperator(
-        task_id='download_and_load_dataset',
-        python_callable=download_and_load_dataset
+DATA_PATH = '/home/klako/FootballAnalysis/data/'
+OUTPUT_PATH = '/home/klako/FootballAnalysis/output/'
+
+
+def load_and_transform():
+    os.makedirs(OUTPUT_PATH, exist_ok=True)
+
+    # Load CSVs
+    games = pd.read_csv(f'{DATA_PATH}games.csv')
+    players = pd.read_csv(f'{DATA_PATH}players.csv')
+    clubs = pd.read_csv(f'{DATA_PATH}clubs.csv')
+
+    # === DIMENSION: Time ===
+    dim_time = games[['date']].drop_duplicates()
+    dim_time['time_id'] = dim_time['date']
+    dim_time.to_csv(f'{OUTPUT_PATH}dim_time.csv', index=False)
+
+    # === DIMENSION: Season ===
+    dim_season = games[['season']].drop_duplicates()
+    dim_season['season_id'] = dim_season['season']
+    dim_season.to_csv(f'{OUTPUT_PATH}dim_season.csv', index=False)
+
+    # === DIMENSION: Players ===
+    dim_players = players[['player_id', 'name', 'country_of_birth', 'country_of_citizenship']]
+    dim_players.to_csv(f'{OUTPUT_PATH}dim_players.csv', index=False)
+
+    # === DIMENSION: Clubs ===
+    dim_clubs = clubs[['club_id', 'name', 'total_market_value', 'squad_size']]
+    dim_clubs.to_csv(f'{OUTPUT_PATH}dim_clubs.csv', index=False)
+
+    # === DIMENSION: Competitions ===
+    dim_comp = games[['competition_id']].drop_duplicates()
+    dim_comp['competition_name'] = 'N/A'  # Możesz ręcznie dodać nazwy
+    dim_comp.to_csv(f'{OUTPUT_PATH}dim_competitions.csv', index=False)
+
+    # === FACT: Matches ===
+    fact_matches = games[[
+        'game_id',
+        'date',
+        'season',
+        'competition_id',
+        'home_club_id',
+        'away_club_id',
+        'home_club_goals',
+        'away_club_goals'
+    ]]
+    fact_matches['result'] = fact_matches.apply(
+        lambda row: 'Home Win' if row['home_club_goals'] > row['away_club_goals']
+        else ('Away Win' if row['home_club_goals'] < row['away_club_goals'] else 'Draw'), axis=1
     )
+    fact_matches.to_csv(f'{OUTPUT_PATH}fact_matches.csv', index=False)
 
-    t2 = PythonOperator(
-        task_id='preprocess_data',
-        python_callable=preprocess_data
-    )
-
-    t3 = PythonOperator(
-        task_id='prepare_for_powerbi',
-        python_callable=prepare_for_powerbi
-    )
-
-    t1 >> t2 >> t3
+load_task = PythonOperator(
+    task_id='transform_and_save_data',
+    python_callable=load_and_transform,
+    dag=dag,
+)

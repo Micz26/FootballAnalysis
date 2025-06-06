@@ -4,6 +4,15 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
+pip install pyodbc sqlalchemy python-dotenv
+
+pip install pymssql
+
+
+sudo apt-get update
+sudo apt-get install unixodbc unixodbc-dev
+sudo apt-get install msodbcsql17
+
 
 pip install kagglehub pandas apache-airflow
 
@@ -19,3 +28,5 @@ airflow users create \
 
 
 airflow scheduler
+# In terminal 2 - Webserver
+airflow webserver --port 8081

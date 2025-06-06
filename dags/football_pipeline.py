@@ -2,10 +2,12 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from datetime import datetime
 import pandas as pd
-import os
+from dotenv import load_dotenv
 import logging
+import os
 import zipfile
 import subprocess
+from sqlalchemy import create_engine
 
 default_args = {
     'owner': 'airflow',
@@ -17,6 +19,8 @@ dag = DAG(
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
+    # schedule_interval='*/10 * * * *',  # co 10 minut
+    # catchup=False,
 )
 
 DATA_PATH = '/home/klako/FootballAnalysis/data/'
@@ -90,12 +94,52 @@ def load_and_transform():
         )
         fact_matches.to_csv(os.path.join(OUTPUT_PATH, 'fact_matches.csv'), index=False)
 
-        logging.info("ETL process completed successfully.")
-        return "ETL process completed successfully."
+        # # Zapis do plików CSV (jeśli chcesz zachować)
+        # dim_time.to_csv(os.path.join(OUTPUT_PATH, 'dim_time.csv'), index=False)
+        # dim_season.to_csv(os.path.join(OUTPUT_PATH, 'dim_season.csv'), index=False)
+        # dim_players.to_csv(os.path.join(OUTPUT_PATH, 'dim_players.csv'), index=False)
+        # dim_clubs.to_csv(os.path.join(OUTPUT_PATH, 'dim_clubs.csv'), index=False)
+        # dim_comp.to_csv(os.path.join(OUTPUT_PATH, 'dim_competitions.csv'), index=False)
+        # fact_matches.to_csv(os.path.join(OUTPUT_PATH, 'fact_matches.csv'), index=False)
+
+        load_dotenv()
+
+        server = os.getenv('SQL_SERVER')
+        database = os.getenv('SQL_DATABASE')
+        username = os.getenv('SQL_USERNAME')
+        password = os.getenv('SQL_PASSWORD')
+        driver = os.getenv('SQL_DRIVER', 'ODBC Driver 17 for SQL Server')
+
+        if not all([server, database, username, password]):
+            raise ValueError("Not all variables in .env are set (SQL_SERVER, SQL_DATABASE, SQL_USERNAME, SQL_PASSWORD)")
+
+        # Escape spaces in driver name for the connection string
+        driver_escaped = driver.replace(' ', '+')
+
+        # Tworzenie connection stringa SQLAlchemy z pyodbc
+        connection_string = (
+            f"mssql+pyodbc://{username}:{password}@{server}/{database}"
+            f"?driver={driver_escaped}"
+        )
+
+        engine = create_engine(connection_string)
+
+        # Zapis do SQL Server
+        dim_time.to_sql('dim_time', con=engine, if_exists='replace', index=False)
+        dim_season.to_sql('dim_season', con=engine, if_exists='replace', index=False)
+        dim_players.to_sql('dim_players', con=engine, if_exists='replace', index=False)
+        dim_clubs.to_sql('dim_clubs', con=engine, if_exists='replace', index=False)
+        dim_comp.to_sql('dim_competitions', con=engine, if_exists='replace', index=False)
+        fact_matches.to_sql('fact_matches', con=engine, if_exists='replace', index=False)
+
+
+        logging.info("ETL and SQL Server upload completed successfully.")
+        return "ETL and SQL Server upload completed successfully."
 
     except Exception as e:
         logging.error("ETL process failed", exc_info=True)
         raise
+
 
 # Define Airflow tasks
 download_task = PythonOperator(

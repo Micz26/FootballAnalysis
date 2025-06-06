@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+
 # C extensions
 *.so
 
@@ -185,6 +186,7 @@ __pycache__/
 logs/
 airflow.db
 unittests.cfg
+airflow.cfg
 
 # Env
 venv/

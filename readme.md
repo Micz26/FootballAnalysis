@@ -1,5 +1,3 @@
-
-
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -16,7 +14,7 @@ sudo apt-get install msodbcsql17
 
 pip install kagglehub pandas apache-airflow
 
-export AIRFLOW_HOME=~/FootballAnalysis
+export AIRFLOW_HOME=$(pwd)
 
 airflow users create \
     --username admin \
@@ -28,5 +26,5 @@ airflow users create \
 
 
 airflow scheduler
-# In terminal 2 - Webserver
+
 airflow webserver --port 8081

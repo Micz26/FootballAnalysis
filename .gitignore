@@ -187,6 +187,7 @@ logs/
 airflow.db
 unittests.cfg
 airflow.cfg
+airflow-webserver.pid
 
 # Env
 venv/

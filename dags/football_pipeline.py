@@ -7,7 +7,17 @@ import logging
 import os
 import zipfile
 import subprocess
-from sqlalchemy import create_engine
+from sqlalchemy import (
+    create_engine,
+    Table,
+    Column,
+    Integer,
+    String,
+    Float,
+    MetaData,
+    Date,
+)
+
 
 default_args = {
     "owner": "airflow",
@@ -15,7 +25,7 @@ default_args = {
 }
 
 dag = DAG(
-    dag_id="`football_etl_model_star`",
+    dag_id="football_etl_model_star",
     default_args=default_args,
     schedule_interval=None,
     catchup=False,
@@ -63,112 +73,143 @@ def load_and_transform():
     try:
         os.makedirs(OUTPUT_PATH, exist_ok=True)
 
+        # === Load CSVs ===
         games = pd.read_csv(os.path.join(DATA_PATH, "games.csv"))
-        players = pd.read_csv(os.path.join(DATA_PATH, "players.csv"))
         clubs = pd.read_csv(os.path.join(DATA_PATH, "clubs.csv"))
+        competitions = pd.read_csv(os.path.join(DATA_PATH, "competitions.csv"))
 
-        # === DIMENSION: Time ===
-        dim_time = games[["date"]].drop_duplicates()
-        dim_time["time_id"] = dim_time["date"]
-        dim_time.to_csv(os.path.join(OUTPUT_PATH, "dim_time.csv"), index=False)
-
-        # === DIMENSION: Season ===
-        dim_season = games[["season"]].drop_duplicates()
-        dim_season["season_id"] = dim_season["season"]
-        dim_season.to_csv(os.path.join(OUTPUT_PATH, "dim_season.csv"), index=False)
-
-        # === DIMENSION: Players ===
-        dim_players = players[
-            ["player_id", "name", "country_of_birth", "country_of_citizenship"]
-        ]
-        dim_players.to_csv(os.path.join(OUTPUT_PATH, "dim_players.csv"), index=False)
-
-        # === DIMENSION: Clubs ===
-        dim_clubs = clubs[["club_id", "name", "total_market_value", "squad_size"]]
-        dim_clubs.to_csv(os.path.join(OUTPUT_PATH, "dim_clubs.csv"), index=False)
-
-        # === DIMENSION: Competitions ===
-        dim_comp = games[["competition_id"]].drop_duplicates()
-        dim_comp["competition_name"] = "N/A"
-        dim_comp.to_csv(os.path.join(OUTPUT_PATH, "dim_competitions.csv"), index=False)
-
-        # === FACT: Matches ===
-        fact_matches = games[
+        # === Transform FACT: Match ===
+        fact_match = games[
             [
                 "game_id",
-                "date",
-                "season",
-                "competition_id",
-                "home_club_id",
-                "away_club_id",
                 "home_club_goals",
                 "away_club_goals",
+                "home_club_id",
+                "away_club_id",
+                "competition_id",
+                "date",
             ]
         ].copy()
-
-        fact_matches["result"] = fact_matches.apply(
-            lambda row: (
-                "Home Win"
-                if row["home_club_goals"] > row["away_club_goals"]
-                else (
-                    "Away Win"
-                    if row["home_club_goals"] < row["away_club_goals"]
-                    else "Draw"
-                )
-            ),
-            axis=1,
+        fact_match.rename(
+            columns={"game_id": "match_id", "date": "match_date"}, inplace=True
         )
-        fact_matches.to_csv(os.path.join(OUTPUT_PATH, "fact_matches.csv"), index=False)
+        fact_match["home_goals"] = games["home_club_goals"].astype(int)
+        fact_match["away_goals"] = games["away_club_goals"].astype(int)
+        fact_match["match_date"] = pd.to_datetime(fact_match["match_date"]).dt.date
+        fact_match = fact_match[
+            [
+                "match_id",
+                "home_goals",
+                "away_goals",
+                "home_club_id",
+                "away_club_id",
+                "competition_id",
+                "match_date",
+            ]
+        ]
 
-        # # Zapis do plików CSV (jeśli chcesz zachować)
-        # dim_time.to_csv(os.path.join(OUTPUT_PATH, 'dim_time.csv'), index=False)
-        # dim_season.to_csv(os.path.join(OUTPUT_PATH, 'dim_season.csv'), index=False)
-        # dim_players.to_csv(os.path.join(OUTPUT_PATH, 'dim_players.csv'), index=False)
-        # dim_clubs.to_csv(os.path.join(OUTPUT_PATH, 'dim_clubs.csv'), index=False)
-        # dim_comp.to_csv(os.path.join(OUTPUT_PATH, 'dim_competitions.csv'), index=False)
-        # fact_matches.to_csv(os.path.join(OUTPUT_PATH, 'fact_matches.csv'), index=False)
+        # === DIMENSION: Season === (SCD1)
+        dim_season = games[["date"]].drop_duplicates()
+        dim_season["season"] = pd.to_datetime(dim_season["date"]).dt.year.astype(str)
+        dim_season = dim_season[["season"]].drop_duplicates()
 
+        # === DIMENSION: Club === (SCD2)
+        dim_club = clubs[["club_id", "pretty_name", "country_id"]].copy()
+        dim_club.rename(columns={"pretty_name": "club_name"}, inplace=True)
+        dim_club["club_name"] = dim_club["club_name"].str.strip()
+
+        # === DIMENSION: Competition === (SCD2)
+        dim_competition = competitions[
+            ["competition_id", "name", "country_name"]
+        ].copy()
+        dim_competition.rename(
+            columns={"name": "competition_name", "country_name": "country"},
+            inplace=True,
+        )
+
+        # === DIMENSION: Time === (SCD1)
+        dim_time = games[["date"]].drop_duplicates().copy()
+        dim_time["match_date"] = pd.to_datetime(dim_time["date"]).dt.date
+        dim_time["year"] = pd.to_datetime(dim_time["date"]).dt.year
+        dim_time["month"] = pd.to_datetime(dim_time["date"]).dt.month
+        dim_time["day_of_week"] = pd.to_datetime(dim_time["date"]).dt.day_name()
+        dim_time = dim_time[["match_date", "year", "month", "day_of_week"]]
+
+        # === DB CONNECTION ===
         load_dotenv()
+        host = os.getenv("POSTGRES_HOST")
+        port = os.getenv("POSTGRES_PORT", "5432")
+        db = os.getenv("POSTGRES_DB")
+        user = os.getenv("POSTGRES_USER")
+        password = os.getenv("POSTGRES_PASSWORD")
 
-        server = os.getenv("SQL_SERVER")
-        database = os.getenv("SQL_DATABASE")
-        username = os.getenv("SQL_USERNAME")
-        password = os.getenv("SQL_PASSWORD")
-        driver = os.getenv("SQL_DRIVER", "ODBC Driver 17 for SQL Server")
+        if not all([host, port, db, user, password]):
+            raise ValueError("Missing DB environment variables.")
 
-        if not all([server, database, username, password]):
-            raise ValueError(
-                "Not all variables in .env are set (SQL_SERVER, SQL_DATABASE, SQL_USERNAME, SQL_PASSWORD)"
-            )
-
-        # Escape spaces in driver name for the connection string
-        driver_escaped = driver.replace(" ", "+")
-
-        # Tworzenie connection stringa SQLAlchemy z pyodbc
         connection_string = (
-            f"mssql+pyodbc://{username}:{password}@{server}/{database}"
-            f"?driver={driver_escaped}"
+            f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
         )
-
         engine = create_engine(connection_string)
+        metadata = MetaData()
 
-        # Zapis do SQL Server
-        dim_time.to_sql("dim_time", con=engine, if_exists="replace", index=False)
-        dim_season.to_sql("dim_season", con=engine, if_exists="replace", index=False)
-        dim_players.to_sql("dim_players", con=engine, if_exists="replace", index=False)
-        dim_clubs.to_sql("dim_clubs", con=engine, if_exists="replace", index=False)
-        dim_comp.to_sql(
-            "dim_competitions", con=engine, if_exists="replace", index=False
-        )
-        fact_matches.to_sql(
-            "fact_matches", con=engine, if_exists="replace", index=False
+        # === Define Tables ===
+        match_table = Table(
+            "fact_match",
+            metadata,
+            Column("match_id", Integer, primary_key=True),
+            Column("home_goals", Integer),
+            Column("away_goals", Integer),
+            Column("home_club_id", Integer),
+            Column("away_club_id", Integer),
+            Column("competition_id", Integer),
+            Column("match_date", Date),
         )
 
-        logging.info("ETL and SQL Server upload completed successfully.")
-        return "ETL and SQL Server upload completed successfully."
+        season_table = Table(
+            "dim_season", metadata, Column("season", String, primary_key=True)
+        )
+
+        club_table = Table(
+            "dim_club",
+            metadata,
+            Column("club_id", Integer, primary_key=True),
+            Column("club_name", String),
+            Column("country_id", Integer),
+        )
+
+        comp_table = Table(
+            "dim_competition",
+            metadata,
+            Column("competition_id", Integer, primary_key=True),
+            Column("competition_name", String),
+            Column("country", String),
+        )
+
+        time_table = Table(
+            "dim_time",
+            metadata,
+            Column("match_date", Date, primary_key=True),
+            Column("year", Integer),
+            Column("month", Integer),
+            Column("day_of_week", String),
+        )
+
+        # === Create and Insert ===
+        metadata.drop_all(engine)
+        metadata.create_all(engine)
+
+        with engine.connect() as conn:
+            conn.execute(match_table.insert(), fact_match.to_dict(orient="records"))
+            conn.execute(season_table.insert(), dim_season.to_dict(orient="records"))
+            conn.execute(club_table.insert(), dim_club.to_dict(orient="records"))
+            conn.execute(comp_table.insert(), dim_competition.to_dict(orient="records"))
+            conn.execute(time_table.insert(), dim_time.to_dict(orient="records"))
+
+        logging.info("✅ ETL and upload to PostgreSQL completed successfully.")
+        return "✅ ETL and upload to PostgreSQL completed successfully."
 
     except Exception as e:
-        logging.error("ETL process failed", exc_info=True)
+        logging.error("❌ ETL process failed", exc_info=True)
         raise
 
 

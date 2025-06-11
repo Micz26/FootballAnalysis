@@ -16,6 +16,7 @@ from sqlalchemy import (
     Float,
     MetaData,
     Date,
+    BigInteger,
 )
 
 
@@ -78,6 +79,30 @@ def load_and_transform():
         clubs = pd.read_csv(os.path.join(DATA_PATH, "clubs.csv"))
         competitions = pd.read_csv(os.path.join(DATA_PATH, "competitions.csv"))
 
+        # === DIMENSION: Season === (SCD1)
+        season_mapping = (
+            games[["season"]]
+            .drop_duplicates()
+            .reset_index(drop=True)
+            .sort_values(by="season")
+        )
+        season_mapping["season_id"] = range(1, len(season_mapping) + 1)
+
+        # Final dim_season table
+        dim_season = season_mapping[["season_id", "season"]]
+
+        dim_time = games[["date"]].drop_duplicates().copy()
+        dim_time["match_date"] = pd.to_datetime(dim_time["date"]).dt.date
+        dim_time["year"] = pd.to_datetime(dim_time["date"]).dt.year
+        dim_time["month"] = pd.to_datetime(dim_time["date"]).dt.month
+        dim_time["day"] = pd.to_datetime(dim_time["date"]).dt.day
+        dim_time["day_of_week"] = pd.to_datetime(dim_time["date"]).dt.day_name()
+        dim_time = dim_time.sort_values("match_date").reset_index(drop=True)
+        dim_time["date_id"] = range(1, len(dim_time) + 1)
+        dim_time = dim_time[
+            ["date_id", "match_date", "year", "month", "day", "day_of_week"]
+        ]
+
         # === Transform FACT: Match ===
         fact_match = games[
             [
@@ -90,12 +115,28 @@ def load_and_transform():
                 "date",
             ]
         ].copy()
-        fact_match.rename(
-            columns={"game_id": "match_id", "date": "match_date"}, inplace=True
+        fact_match.rename(columns={"game_id": "match_id"}, inplace=True)
+        fact_match["home_goals"] = fact_match["home_club_goals"].astype("Int64")
+        fact_match["away_goals"] = fact_match["away_club_goals"].astype("Int64")
+
+        fact_match["home_club_id"] = fact_match["home_club_id"].astype("Int64")
+        fact_match["away_club_id"] = fact_match["away_club_id"].astype("Int64")
+
+        # Add season_id
+        fact_match = fact_match.merge(
+            games[["game_id", "season"]],
+            left_on="match_id",
+            right_on="game_id",
+            how="left",
         )
-        fact_match["home_goals"] = games["home_club_goals"].astype(int)
-        fact_match["away_goals"] = games["away_club_goals"].astype(int)
-        fact_match["match_date"] = pd.to_datetime(fact_match["match_date"]).dt.date
+        fact_match = fact_match.merge(season_mapping, on="season", how="left")
+
+        # Add date_id
+        fact_match["match_date"] = pd.to_datetime(fact_match["date"]).dt.date
+        fact_match = fact_match.merge(
+            dim_time[["date_id", "match_date"]], on="match_date", how="left"
+        )
+
         fact_match = fact_match[
             [
                 "match_id",
@@ -104,18 +145,16 @@ def load_and_transform():
                 "home_club_id",
                 "away_club_id",
                 "competition_id",
-                "match_date",
+                "date_id",
+                "season_id",
             ]
         ]
 
-        # === DIMENSION: Season === (SCD1)
-        dim_season = games[["date"]].drop_duplicates()
-        dim_season["season"] = pd.to_datetime(dim_season["date"]).dt.year.astype(str)
-        dim_season = dim_season[["season"]].drop_duplicates()
-
         # === DIMENSION: Club === (SCD2)
-        dim_club = clubs[["club_id", "pretty_name", "country_id"]].copy()
-        dim_club.rename(columns={"pretty_name": "club_name"}, inplace=True)
+        dim_club = clubs[["club_id", "name"]].copy()
+        dim_club["club_id"] = dim_club["club_id"].astype("Int64")
+
+        dim_club.rename(columns={"name": "club_name"}, inplace=True)
         dim_club["club_name"] = dim_club["club_name"].str.strip()
 
         # === DIMENSION: Competition === (SCD2)
@@ -126,14 +165,6 @@ def load_and_transform():
             columns={"name": "competition_name", "country_name": "country"},
             inplace=True,
         )
-
-        # === DIMENSION: Time === (SCD1)
-        dim_time = games[["date"]].drop_duplicates().copy()
-        dim_time["match_date"] = pd.to_datetime(dim_time["date"]).dt.date
-        dim_time["year"] = pd.to_datetime(dim_time["date"]).dt.year
-        dim_time["month"] = pd.to_datetime(dim_time["date"]).dt.month
-        dim_time["day_of_week"] = pd.to_datetime(dim_time["date"]).dt.day_name()
-        dim_time = dim_time[["match_date", "year", "month", "day_of_week"]]
 
         # === DB CONNECTION ===
         load_dotenv()
@@ -156,31 +187,34 @@ def load_and_transform():
         match_table = Table(
             "fact_match",
             metadata,
-            Column("match_id", Integer, primary_key=True),
+            Column("match_id", BigInteger, primary_key=True),
             Column("home_goals", Integer),
             Column("away_goals", Integer),
-            Column("home_club_id", Integer),
-            Column("away_club_id", Integer),
-            Column("competition_id", Integer),
-            Column("match_date", Date),
+            Column("home_club_id", BigInteger),
+            Column("away_club_id", BigInteger),
+            Column("competition_id", String),
+            Column("date_id", BigInteger),
+            Column("season_id", BigInteger),
         )
 
         season_table = Table(
-            "dim_season", metadata, Column("season", String, primary_key=True)
+            "dim_season",
+            metadata,
+            Column("season_id", BigInteger, primary_key=True),
+            Column("season", String),
         )
 
         club_table = Table(
             "dim_club",
             metadata,
-            Column("club_id", Integer, primary_key=True),
+            Column("club_id", BigInteger, primary_key=True),
             Column("club_name", String),
-            Column("country_id", Integer),
         )
 
         comp_table = Table(
             "dim_competition",
             metadata,
-            Column("competition_id", Integer, primary_key=True),
+            Column("competition_id", String, primary_key=True),
             Column("competition_name", String),
             Column("country", String),
         )
@@ -188,9 +222,11 @@ def load_and_transform():
         time_table = Table(
             "dim_time",
             metadata,
-            Column("match_date", Date, primary_key=True),
+            Column("date_id", BigInteger, primary_key=True),
+            Column("match_date", Date),
             Column("year", Integer),
             Column("month", Integer),
+            Column("day", Integer),
             Column("day_of_week", String),
         )
 
